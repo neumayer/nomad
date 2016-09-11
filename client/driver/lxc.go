@@ -1,3 +1,5 @@
+//+build linux
+
 package driver
 
 import (
@@ -17,6 +19,11 @@ import (
 	cstructs "github.com/hashicorp/nomad/client/structs"
 	lxc "gopkg.in/lxc/go-lxc.v2"
 )
+
+// Add the lxc driver to the list of builtin drivers
+func init() {
+	BuiltinDrivers["lxc"] = NewLxcDriver
+}
 
 type LxcDriver struct {
 	DriverContext
