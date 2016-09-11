@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -127,6 +128,8 @@ func (d *LxcDriver) Start(ctx *ExecContext, task *structs.Task) (DriverHandle, e
 		return nil, fmt.Errorf("unable to create container: %v", err)
 	}
 	c.SetVerbosity(lxc.Verbose)
+	c.SetLogLevel(lxc.TRACE)
+	c.SetLogFile("/tmp/lxc")
 
 	options := lxc.TemplateOptions{
 		Template:             driverConfig.Template,
@@ -141,28 +144,81 @@ func (d *LxcDriver) Start(ctx *ExecContext, task *structs.Task) (DriverHandle, e
 		return nil, fmt.Errorf("unable to create container: %v", err)
 	}
 
-	handle := lxcDriverHandle{
-		container:   c,
-		logger:      d.logger,
-		killTimeout: GetKillTimeout(task.KillTimeout, d.DriverContext.config.MaxKillTimeout),
+	if err := c.Start(); err != nil {
+		return nil, fmt.Errorf("unable to start container: %v", err)
 	}
+
+	handle := lxcDriverHandle{
+		container:      c,
+		lxcPath:        lxcPath,
+		logger:         d.logger,
+		killTimeout:    GetKillTimeout(task.KillTimeout, d.DriverContext.config.MaxKillTimeout),
+		maxKillTimeout: d.DriverContext.config.MaxKillTimeout,
+		waitCh:         make(chan *dstructs.WaitResult, 1),
+	}
+	go handle.run()
 
 	return &handle, nil
 }
 
 func (d *LxcDriver) Open(ctx *ExecContext, handleID string) (DriverHandle, error) {
-	return nil, nil
+	pid := &lxcPID{}
+	if err := json.Unmarshal([]byte(handleID), pid); err != nil {
+		return nil, fmt.Errorf("Failed to parse handle '%s': %v", handleID, err)
+	}
+
+	var container *lxc.Container
+	containers := lxc.Containers(pid.LxcPath)
+	for _, c := range containers {
+		if c.Name() == pid.ContainerName {
+			container = &c
+			break
+		}
+	}
+
+	if container == nil {
+		return nil, fmt.Errorf("container %v not found", pid.ContainerName)
+	}
+
+	handle := lxcDriverHandle{
+		container:      container,
+		lxcPath:        pid.LxcPath,
+		logger:         d.logger,
+		killTimeout:    pid.KillTimeout,
+		maxKillTimeout: d.DriverContext.config.MaxKillTimeout,
+		waitCh:         make(chan *dstructs.WaitResult, 1),
+	}
+	go handle.run()
+
+	return &handle, nil
 }
 
 type lxcDriverHandle struct {
-	container   *lxc.Container
-	logger      *log.Logger
-	killTimeout time.Duration
-	waitCh      chan *dstructs.WaitResult
+	container      *lxc.Container
+	lxcPath        string
+	logger         *log.Logger
+	killTimeout    time.Duration
+	maxKillTimeout time.Duration
+	waitCh         chan *dstructs.WaitResult
+}
+
+type lxcPID struct {
+	ContainerName string
+	LxcPath       string
+	KillTimeout   time.Duration
 }
 
 func (h *lxcDriverHandle) ID() string {
-	return h.container.Name()
+	pid := lxcPID{
+		ContainerName: h.container.Name(),
+		LxcPath:       h.lxcPath,
+		KillTimeout:   h.killTimeout,
+	}
+	data, err := json.Marshal(pid)
+	if err != nil {
+		h.logger.Printf("[ERR] driver.lxc: failed to marshal lxc PID to JSON: %v", err)
+	}
+	return string(data)
 }
 
 func (h *lxcDriverHandle) WaitCh() chan *dstructs.WaitResult {
@@ -175,9 +231,27 @@ func (h *lxcDriverHandle) Update(task *structs.Task) error {
 }
 
 func (h *lxcDriverHandle) Kill() error {
+	h.logger.Printf("[INFO] driver.lxc: shutting down container %q", h.container.Name())
+	if err := h.container.Shutdown(h.killTimeout); err != nil {
+		h.logger.Printf("[INFO] driver.lxc: shutting down container %q failed. stopping it", h.container.Name())
+		if err := h.container.Stop(); err != nil {
+			h.logger.Printf("[ERR] driver.lxc: error stopping container %q: %v", h.container.Name(), err)
+		}
+	}
 	return nil
 }
 
 func (h *lxcDriverHandle) Stats() (*cstructs.TaskResourceUsage, error) {
 	return nil, nil
+}
+
+func (h *lxcDriverHandle) run() {
+	var stopped bool
+	for !stopped {
+		if hasStoped := h.container.Wait(lxc.STOPPED, 10*time.Minute); hasStoped {
+			stopped = true
+		}
+	}
+	h.waitCh <- &dstructs.WaitResult{}
+	close(h.waitCh)
 }
