@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/circonus"
+	"github.com/armon/go-metrics/prometheus"
 	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/go-checkpoint"
 	"github.com/hashicorp/go-syslog"
@@ -26,6 +28,7 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs/config"
 	"github.com/hashicorp/scada-client/scada"
 	"github.com/mitchellh/cli"
+	prometheusclient "github.com/prometheus/client_golang/prometheus"
 )
 
 // gracefulTimeout controls how long we wait before forcefully terminating
@@ -592,6 +595,20 @@ func (c *Command) setupTelementry(config *Config) error {
 			return err
 		}
 		fanout = append(fanout, sink)
+	}
+
+	// todo
+	if telConfig.StatsdAddr == "prometheus" {
+		sink, err := prometheus.NewPrometheusSink()
+		if err != nil {
+			return err
+		}
+		fanout = append(fanout, sink)
+		http.Handle("/metrics", prometheusclient.Handler())
+		addr := "localhost:8080"
+		go func() {
+			http.ListenAndServe(addr, nil)
+		}()
 	}
 
 	// Configure the Circonus sink
