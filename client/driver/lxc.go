@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/hashicorp/nomad/client/config"
@@ -129,7 +130,9 @@ func (d *LxcDriver) Start(ctx *ExecContext, task *structs.Task) (DriverHandle, e
 	}
 	c.SetVerbosity(lxc.Verbose)
 	c.SetLogLevel(lxc.TRACE)
-	c.SetLogFile("/tmp/lxc")
+
+	logFile := filepath.Join(ctx.AllocDir.LogDir(), fmt.Sprintf("%v-lxc.log", task.Name))
+	c.SetLogFile(logFile)
 
 	options := lxc.TemplateOptions{
 		Template:             driverConfig.Template,
